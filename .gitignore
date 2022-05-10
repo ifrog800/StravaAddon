@@ -1,0 +1,10 @@
+node_modules
+
+# ignores
+ignore/
+ig/
+*.ignore
+*.ig
+
+
+.vscode/

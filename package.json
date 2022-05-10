@@ -1,0 +1,14 @@
+{
+  "name": "stravaaddon",
+  "version": "1.0.0",
+  "description": "Adds custom data to Strava Activities",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "nodemon": "^2.0.16"
+  }
+}
