@@ -6,5 +6,8 @@ ig/
 *.ignore
 *.ig
 
+# dev settings.json file
+ignore.json
+
 
 .vscode/
