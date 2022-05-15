@@ -1,6 +1,8 @@
+const FS = require("fs")
 const HTTP = require("http")
 const HTTPS = require("https")
 const URL = require("url")
+const ZLIB = require("zlib")
 
 // actual settings location
 // const SETTINGS = require(`${__dirname}/settings.json`)
@@ -11,6 +13,40 @@ const HTML_BUILDER = require(`./html_builder.json`)
 const OAUTH_URL = `https://www.strava.com/oauth/authorize?response_type=code&client_id=${SETTINGS.client_id}&redirect_uri=http://localhost:${SETTINGS.port}/strava/oauth&scope=read,activity:read_all,activity:write&approval_prompt=force`
 
 
+
+
+
+function writeFileJson(dir = SETTINGS.data_dir, fileName = "_ERROR_", data = "STRING", useCompression = true) {
+    dir = dir.trim()
+    fileName = fileName.trim()
+
+    FS.mkdirSync(dir, { recursive: true })
+
+    if (typeof data != "string") {
+        data = JSON.stringify(data)
+    }
+
+    if (!useCompression) {
+        if (!fileName.endsWith(".json")) {
+            fileName += ".json"
+        }
+        FS.writeFile(dir + fileName, data, "utf-8", () => { })
+        return
+    }
+
+    if (fileName.endsWith(".json")) {
+        fileName += ".gz"
+    } else if (!fileName.endsWith(".json.gz")) {
+        fileName += ".json.gz"
+    }
+
+
+    const gzip = ZLIB.createGzip({ level: 9 })
+    const file = FS.createWriteStream(fileName)
+    gzip.end(data)
+    gzip.pipe(file)
+    file.close()
+}
 
 
 
@@ -68,7 +104,6 @@ function route_oauthPrompt(req, res, msg = "Click here to grant access to your S
 
 
 function route_oauthHandler(req, res) {
-    console.log(`${new Date()} [GET REQ] ${req.url}`)
     const QUERY = URL.parse(req.url, true).query
     if (QUERY.error == "access_denied") {
         // user clicked cancel on OAUTH prompt, try again
@@ -102,14 +137,23 @@ function route_oauthHandler(req, res) {
         response.on("end", () => {
             try {
                 const DATA = JSON.parse(str)
-                console.log(DATA)
-                /*
-                DATA is useable information
-                todo
-                    check to make sure no errors
-                        use DATA.["errors"] property
-                    store result into database
-                */
+                if (DATA.errors) {
+                    // error with getting token, try again
+                    route_oauthPrompt(req, res, "An unexpected error has occurred. Please try again.")
+                    console.debug(DATA)
+                    return
+                }
+
+                res.writeHead(200)
+                res.write(HTML_BUILDER.html_start)
+                res.write("OAUTH Granted")
+                res.write(HTML_BUILDER.head_title)
+                res.write(HTML_BUILDER.head_end)
+                res.write(`<h1>Very Cool.</h1>`)
+                res.write(HTML_BUILDER.html_end)
+                res.end()
+
+                writeFileJson(SETTINGS.data_dir + "/strava_oauth/", DATA.athlete.id, JSON.stringify(DATA))
             } catch (error) {
                 console.error(`${new Date()}`)
                 console.error(error)
@@ -121,8 +165,6 @@ function route_oauthHandler(req, res) {
         console.error(error)
     })
     REQUEST.end()
-    res.writeHead(200)
-    res.end(JSON.stringify(QUERY))
 }
 
 

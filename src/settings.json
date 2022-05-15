@@ -2,5 +2,6 @@
     "token": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
     "port": 4747,
     "client_id": 11111,
-    "client_secret": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+    "client_secret": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "data_dir": "./.strava_addon_data"
 }

@@ -11,3 +11,5 @@ ignore.json
 
 
 .vscode/
+
+.strava_addon_data/
