@@ -17,6 +17,14 @@ const CACHE = {
 
 
 
+/**
+ * Saves a JSON object in String form onto the file system.
+ * 
+ * @param {String} dir A path like directory where the file will be stored.
+ * @param {String} fileName The filename to write data to.
+ * @param {String} data Data that will be stored in the file.
+ * @param {Boolean} useCompression Will the resulting JSON file be compressed using gzip?
+ */
 function writeFileJson(dir = SETTINGS.data_dir, fileName = "_ERROR_", data = "STRING", useCompression = SETTINGS.gzip_comp_data) {
     dir = dir.trim()
     fileName = ("" + fileName).trim()
@@ -51,9 +59,16 @@ function writeFileJson(dir = SETTINGS.data_dir, fileName = "_ERROR_", data = "ST
 }
 
 
-function readJsonFile(location = null, isGzip = SETTINGS.gzip_comp_data) {
+/**
+ * Reads a JSON file from the file system into a JSON object.
+ * 
+ * @param {String} location path like location including directory and filename with extension
+ * @param {Boolean} isGzip is the data stored in compressed form?
+ * @returns data JSON | error String
+ */
+function readJsonFile(location, isGzip = SETTINGS.gzip_comp_data) {
     return new Promise((res, err) => {
-        if (location == null) {
+        if (!location) {
             return err("[readJsonFile] missing file location")
         }
 
@@ -89,9 +104,17 @@ function readJsonFile(location = null, isGzip = SETTINGS.gzip_comp_data) {
 }
 
 
-function getUserOauth(userid = null, isGzip = SETTINGS.gzip_comp_data) {
+/**
+ * Returns the JSON object from initial authentication. Contains refresh token & access token.
+ * 
+ * {@link https://developers.strava.com/docs/getting-started API DOCS}
+ * @param {String | Number} userid The userid of the Strava user
+ * @param {Boolean} isGzip Is the data stored in compressed form?
+ * @returns data JSON | error String
+ */
+function getUserOauth(userid, isGzip = SETTINGS.gzip_comp_data) {
     return new Promise((res, err) => {
-        if (userid == null) {
+        if (!userid) {
             return err("missing userid")
         }
 
@@ -112,9 +135,17 @@ function getUserOauth(userid = null, isGzip = SETTINGS.gzip_comp_data) {
 }
 
 
-function getStravaAPI(endpoint = null, userid = null) {
+/**
+ * Returns JSON object after GET requesting the info from the Strava API.
+ * 
+ * {@link https://developers.strava.com/docs/reference API DOCS}
+ * @param {String} endpoint Strava API endpoint url, not including /api/v3/
+ * @param {String | Number} userid The userid who's access token will be used.
+ * @returns data JSON | error String
+ */
+function getStravaAPI(endpoint, userid = null) {
     return new Promise((res, err) => {
-        if (endpoint == null) {
+        if (!endpoint) {
             return err("missing strava endpoint")
         }
 
@@ -148,19 +179,32 @@ function getStravaAPI(endpoint = null, userid = null) {
         })
 
         REQUEST.setHeader("accept", "application/json")
-        REQUEST.setHeader("authorization", `Bearer ${SETTINGS.token}`) // todo use actual user bearer token
-
         REQUEST.on("error", (error) => {
             console.error(`${new Date()}`)
             console.error(error)
             return err(`${new Date()} [getJson] error in https request`)
         })
 
-        REQUEST.end()
+        getUserOauth(userid)
+            .then(user => {
+                REQUEST.setHeader("authorization", `Bearer ${user.access_token}`) // todo use actual user bearer token
+                REQUEST.end()
+            })
+            .catch(error => {
+                console.error(`${new Date()} [getStravaAPI] ${error}`)
+                err(`[getStravaAPI] ${error}`)
+            })
     })
 }
 
 
+/**
+ * Handles building the webpage for responding to /strava/oauth?
+ * 
+ * @param {HTTP.IncomingMessage} req HTTP request
+ * @param {HTTP.ServerResponse} res HTTP response
+ * @param {String} msg Message to display on webpage as information.
+ */
 function route_oauthPrompt(req, res, msg = "Click here to grant access to your Strava account.") {
     res.writeHead(200)
     res.write(HTML_BUILDER.html_start)
@@ -173,6 +217,11 @@ function route_oauthPrompt(req, res, msg = "Click here to grant access to your S
 }
 
 
+/**
+ * Handles the routing for /strava/oauth?
+ * @param {HTTP.IncomingMessage} req HTTP request
+ * @param {HTTP.ServerResponse} res HTTP response
+ */
 function route_oauthHandler(req, res) {
     const QUERY = URL.parse(req.url, true).query
     if (QUERY.error == "access_denied") {
