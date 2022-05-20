@@ -11,14 +11,15 @@ const ZLIB = require("zlib")
 const SETTINGS = require(`./ignore.json`)
 const HTML_BUILDER = require(`./html_builder.json`)
 const OAUTH_URL = `https://www.strava.com/oauth/authorize?response_type=code&client_id=${SETTINGS.client_id}&redirect_uri=http://localhost:${SETTINGS.port}/strava/oauth&scope=read,activity:read_all,activity:write&approval_prompt=force`
+const CACHE = {
+    user_oauth: {}
+}
 
 
 
-
-
-function writeFileJson(dir = SETTINGS.data_dir, fileName = "_ERROR_", data = "STRING", useCompression = true) {
+function writeFileJson(dir = SETTINGS.data_dir, fileName = "_ERROR_", data = "STRING", useCompression = SETTINGS.gzip_comp_data) {
     dir = dir.trim()
-    fileName = fileName.trim()
+    fileName = ("" + fileName).trim()
 
     FS.mkdirSync(dir, { recursive: true })
 
@@ -26,6 +27,7 @@ function writeFileJson(dir = SETTINGS.data_dir, fileName = "_ERROR_", data = "ST
         data = JSON.stringify(data)
     }
 
+    // regular .json file
     if (!useCompression) {
         if (!fileName.endsWith(".json")) {
             fileName += ".json"
@@ -34,6 +36,7 @@ function writeFileJson(dir = SETTINGS.data_dir, fileName = "_ERROR_", data = "ST
         return
     }
 
+    // sanitizes file extension
     if (fileName.endsWith(".json")) {
         fileName += ".gz"
     } else if (!fileName.endsWith(".json.gz")) {
@@ -41,17 +44,84 @@ function writeFileJson(dir = SETTINGS.data_dir, fileName = "_ERROR_", data = "ST
     }
 
 
+    // .json.gz file
     const gzip = ZLIB.createGzip({ level: 9 })
-    const file = FS.createWriteStream(fileName)
+    gzip.pipe(FS.createWriteStream(dir + fileName))
     gzip.end(data)
-    gzip.pipe(file)
-    file.close()
 }
 
 
-
-function getStravaAPI(endpoint) {
+function readJsonFile(location = null, isGzip = SETTINGS.gzip_comp_data) {
     return new Promise((res, err) => {
+        if (location == null) {
+            return err("[readJsonFile] missing file location")
+        }
+
+        if (!FS.existsSync(LOCATION)) {
+            return err(`[readJsonFile] file @ "${LOCATION}" does not exist`)
+        }
+
+        // decompresses .json.gz file
+        if (isGzip) {
+            const UNZIP = ZLIB.createUnzip()
+            const STREAM = FS.createReadStream(LOCATION).pipe(UNZIP)
+            let result = ""
+            STREAM.on("data", data => {
+                result += data.toString()
+            })
+            STREAM.on("end", () => {
+                UNZIP.end()
+                res(JSON.parse(result))
+            })
+            return
+        }
+
+        // regular .json file
+        FS.readFile(LOCATION, (error, buffer) => {
+            if (error) {
+                console.error(`${new Date()}`)
+                console.error(error)
+                return res(`[readJsonFile] error reading file @ "${error.path}" | ${error.message}`)
+            }
+            return res(JSON.parse(buffer.toString()))
+        })
+    })
+}
+
+
+function getUserOauth(userid = null, isGzip = SETTINGS.gzip_comp_data) {
+    return new Promise((res, err) => {
+        if (userid == null) {
+            return err("missing userid")
+        }
+
+        if (CACHE.user_oauth[userid]) {
+            return res(CACHE.user_oauth[userid])
+        }
+
+        readJsonFile(SETTINGS.data_dir + "/strava_oauth/" + userid + (isGzip ? ".json.gz" : ".json"), isGzip)
+            .then(data => {
+                CACHE.user_oauth[userid] = data
+                return res(data)
+            })
+            .catch(error => {
+                console.error(`${new Date()} [getUserOauth] ${error}`)
+                return err(`[getUserOauth] error: ${error}`)
+            })
+    })
+}
+
+
+function getStravaAPI(endpoint = null, userid = null) {
+    return new Promise((res, err) => {
+        if (endpoint == null) {
+            return err("missing strava endpoint")
+        }
+
+        if (userid == null) {
+            return err("missing user id")
+        }
+
         // todo real endpoint uses HTTPS
         // const REQUEST = HTTPS.request({
         const REQUEST = HTTP.request({
@@ -68,11 +138,11 @@ function getStravaAPI(endpoint) {
             response.on("end", () => {
                 try {
                     const DATA = JSON.parse(str)
-                    res(DATA)
+                    return res(DATA)
                 } catch (error) {
-                    err(`[getJson] failed to parse response from "https://www.strava.com/api/v3/${endpoint}" into JSON`)
                     console.error(`${new Date()}`)
                     console.error(error)
+                    return err(`[getJson] failed to parse response from "https://www.strava.com/api/v3/${endpoint}" into JSON`)
                 }
             })
         })
@@ -81,9 +151,9 @@ function getStravaAPI(endpoint) {
         REQUEST.setHeader("authorization", `Bearer ${SETTINGS.token}`) // todo use actual user bearer token
 
         REQUEST.on("error", (error) => {
-            err(`${new Date()} [getJson] error in https request`)
             console.error(`${new Date()}`)
             console.error(error)
+            return err(`${new Date()} [getJson] error in https request`)
         })
 
         REQUEST.end()
@@ -189,5 +259,5 @@ const SERVER = HTTP.createServer((req, res) => {
 
 
 SERVER.listen(SETTINGS.port, () => {
-    console.log(`\n\n\n\n\n${new Date()}\nwebserver listening on\n\thttp://localhost:${SETTINGS.port}\nClick following link to authorize:\n\t${OAUTH_URL}`)
+    console.log(`\n\n\n\n\n${new Date()}\n\tWeb server listening on\n\t\thttp://localhost:${SETTINGS.port}\n\tClick following link to authorize:\n\t\t${OAUTH_URL}`)
 })
