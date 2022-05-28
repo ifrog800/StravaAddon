@@ -4,7 +4,8 @@
   "description": "Adds custom data to Strava Activities",
   "main": "src/server.js",
   "scripts": {
-    "dev": "nodemon"
+    "dev": "nodemon",
+    "vscode": "nodemon  --inspect src/server.js"
   },
   "author": "",
   "license": "ISC",

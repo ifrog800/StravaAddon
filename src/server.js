@@ -187,13 +187,64 @@ function getStravaAPI(endpoint, userid = null) {
 
         getUserOauth(userid)
             .then(user => {
-                REQUEST.setHeader("authorization", `Bearer ${user.access_token}`) // todo use actual user bearer token
+                REQUEST.setHeader("authorization", `Bearer ${user.access_token}`)
                 REQUEST.end()
             })
             .catch(error => {
                 console.error(`${new Date()} [getStravaAPI] ${error}`)
                 err(`[getStravaAPI] ${error}`)
             })
+    })
+}
+
+
+/**
+ * Goes to Strava and refreshes for new activities
+ */
+function getNewActivities() {
+    FS.readdir(SETTINGS.data_dir + "/strava_oauth/", (err, files) => {
+        if (err) {
+            console.error(`${new Date()}`)
+            console.error(err)
+            return
+        }
+
+        if (files.length == 0) {
+            console.log(`${new Date()} [updateGetActivities] No users to refresh data from.`)
+            return
+        }
+
+        const users = {}
+        files.forEach(file => {
+            users["" + file.split(".")[0]] = 1
+        })
+
+        const pollUser = userid => {
+            getStravaAPI("athlete/activities")
+                .then(res => {
+                    if (res.length == 0) {
+                        return
+                    }
+
+                    const BASE_FS = SETTINGS.data_dir + "/user/" + userid + "/activities/"
+                    FS.mkdirSync(BASE_FS, { recursive: true })
+
+                    for (let i = 0; i < res.length; i++) {
+                        if (FS.existsSync(BASE_FS + res[i].id + ".json")) {
+                            continue
+                        }
+                        // todo is new activity add to queue
+                    }
+                })
+                .catch(e => {
+                    console.error(`${new Date()}`)
+                    console.error(e)
+                })
+        }
+
+        for (const user in users) {
+            pollUser(user)
+        }
     })
 }
 
@@ -279,7 +330,7 @@ function route_oauthHandler(req, res) {
             }
         })
     })
-    REQUEST.on("error", (error) => {
+    REQUEST.on("error", error => {
         console.error(`${new Date()}`)
         console.error(error)
     })
@@ -310,3 +361,5 @@ const SERVER = HTTP.createServer((req, res) => {
 SERVER.listen(SETTINGS.port, () => {
     console.log(`\n\n\n\n\n${new Date()}\n\tWeb server listening on\n\t\thttp://localhost:${SETTINGS.port}\n\tClick following link to authorize:\n\t\t${OAUTH_URL}`)
 })
+
+getNewActivities()
