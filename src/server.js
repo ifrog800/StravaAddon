@@ -4,6 +4,8 @@ const HTTPS = require("https")
 const URL = require("url")
 const ZLIB = require("zlib")
 
+const Queue = require(`./Queue.js`)
+
 // actual settings location
 // const SETTINGS = require(`${__dirname}/settings.json`)
 
@@ -14,13 +16,14 @@ const OAUTH_URL = `https://www.strava.com/oauth/authorize?response_type=code&cli
 const CACHE = {
     user_oauth: {}
 }
-
+// SCHEMA: [ USER_ID, ACTIVITY_ID ]
+const ACTIVITY_QUEUE = new Queue()
 
 
 /**
  * Saves a JSON object in String form onto the file system.
  * 
- * @param {String} dir A path like directory where the file will be stored.
+ * @param {String} dir A path like directory where the file will be stored. (include trailing /)
  * @param {String} fileName The filename to write data to.
  * @param {String} data Data that will be stored in the file.
  * @param {Boolean} useCompression Will the resulting JSON file be compressed using gzip?
@@ -72,14 +75,14 @@ function readJsonFile(location, isGzip = SETTINGS.gzip_comp_data) {
             return err("[readJsonFile] missing file location")
         }
 
-        if (!FS.existsSync(LOCATION)) {
-            return err(`[readJsonFile] file @ "${LOCATION}" does not exist`)
+        if (!FS.existsSync(location)) {
+            return err(`[readJsonFile] file @ "${location}" does not exist`)
         }
 
         // decompresses .json.gz file
         if (isGzip) {
             const UNZIP = ZLIB.createUnzip()
-            const STREAM = FS.createReadStream(LOCATION).pipe(UNZIP)
+            const STREAM = FS.createReadStream(location).pipe(UNZIP)
             let result = ""
             STREAM.on("data", data => {
                 result += data.toString()
@@ -92,7 +95,7 @@ function readJsonFile(location, isGzip = SETTINGS.gzip_comp_data) {
         }
 
         // regular .json file
-        FS.readFile(LOCATION, (error, buffer) => {
+        FS.readFile(location, (error, buffer) => {
             if (error) {
                 console.error(`${new Date()}`)
                 console.error(error)
@@ -119,18 +122,75 @@ function getUserOauth(userid, isGzip = SETTINGS.gzip_comp_data) {
         }
 
         if (CACHE.user_oauth[userid]) {
-            return res(CACHE.user_oauth[userid])
+            if (CACHE.user_oauth[userid].expires_at - (60 * 60) < (Math.floor(new Date().getTime() / 1000.0) + (60 * 60))) {
+                updateTokens(userid, CACHE.user_oauth[userid].refresh_token)
+                    .then(data => {
+                        CACHE.user_oauth[userid] = data
+                        res(data)
+                    })
+                    .catch(err)
+            } else {
+                res(CACHE.user_oauth[userid])
+            }
+            return
         }
 
         readJsonFile(SETTINGS.data_dir + "/strava_oauth/" + userid + (isGzip ? ".json.gz" : ".json"), isGzip)
             .then(data => {
-                CACHE.user_oauth[userid] = data
-                return res(data)
+                if (data.expires_at < (Math.floor(new Date().getTime() / 1000.0) + (60 * 60) + (60 * 60))) {
+                    updateTokens(userid, data.refresh_token)
+                        .then(data => {
+                            CACHE.user_oauth[userid] = data
+                            res(data)
+                        })
+                        .catch(err)
+                    return
+                } else {
+                    CACHE.user_oauth[userid] = data
+                    return res(data)
+                }
             })
             .catch(error => {
                 console.error(`${new Date()} [getUserOauth] ${error}`)
                 return err(`[getUserOauth] error: ${error}`)
             })
+    })
+}
+
+
+function updateTokens(userid, refreshToken) {
+    return new Promise((res, err) => {
+        console.log(`/api/v3/oauth/token?client_id=${SETTINGS.client_id}&client_secret=${SETTINGS.client_secret}&grant_type=refresh_token&refresh_token=${refreshToken}`)
+        const REQUEST = HTTPS.request({
+            host: "www.strava.com",
+            path: `/api/v3/oauth/token?client_id=${SETTINGS.client_id}&client_secret=${SETTINGS.client_secret}&grant_type=refresh_token&refresh_token=${refreshToken}`,
+            method: "POST"
+        }, response => {
+            console.log(`/api/v3/oauth/token?client_id=${SETTINGS.client_id}&client_secret=${SETTINGS.client_secret}&grant_type=refresh_token&refresh_token=${refreshToken}`)
+            let str = ""
+            response.on("data", chunk => str += chunk)
+            response.on("end", () => {
+                try {
+                    const DATA = JSON.parse(str)
+                    if (DATA.errors) {
+                        // error with getting refresh token
+                        console.debug(DATA)
+                        return
+                    }
+                    writeFileJson(SETTINGS.data_dir + "/strava_oauth/", userid, str)
+                    res(DATA)
+                } catch (error) {
+                    console.error(`${new Date()}`)
+                    console.error(error)
+                    err(error)
+                }
+            })
+        })
+        REQUEST.on("error", error => {
+            console.error(`${new Date()} [updateTokens] error:`)
+            console.error(error)
+        })
+        REQUEST.end()
     })
 }
 
@@ -199,6 +259,29 @@ function getStravaAPI(endpoint, userid = null) {
 
 
 /**
+ * Does processing of the activities in the queue one at a time.
+ * @param {String} activityid the activity id
+ */
+function processActivities(userid, activityid) {
+    getStravaAPI("activities/" + activityid, userid)
+        .then(data => {
+            // todo finish
+            writeFileJson(`${SETTINGS.data_dir}/user/${userid}/activities/`, activityid, JSON.stringify(data))
+        })
+        .catch(e => {
+            console.error(`${new Date()} [processActivities] failed to get activity/${activityid}`)
+            console.error(e)
+        })
+        .finally(() => {
+            const next = ACTIVITY_QUEUE.next()
+            if (next && next.length == 2) {
+                processActivities(next[0], next[1])
+            }
+        })
+}
+
+
+/**
  * Goes to Strava and refreshes for new activities
  */
 function getNewActivities() {
@@ -220,7 +303,7 @@ function getNewActivities() {
         })
 
         const pollUser = userid => {
-            getStravaAPI("athlete/activities")
+            getStravaAPI("athlete/activities", userid)
                 .then(res => {
                     if (res.length == 0) {
                         return
@@ -233,7 +316,12 @@ function getNewActivities() {
                         if (FS.existsSync(BASE_FS + res[i].id + ".json")) {
                             continue
                         }
-                        // todo is new activity add to queue
+                        ACTIVITY_QUEUE.add([userid, "" + res[i].id])
+                    }
+
+                    const tmp = ACTIVITY_QUEUE.next()
+                    if (tmp != null) {
+                        processActivities(tmp[0], tmp[1])
                     }
                 })
                 .catch(e => {
@@ -278,10 +366,12 @@ function route_oauthHandler(req, res) {
     if (QUERY.error == "access_denied") {
         // user clicked cancel on OAUTH prompt, try again
         route_oauthPrompt(req, res, "Cancel was pressed. Not authorized.")
+        return
     }
     if (QUERY.scope == undefined || QUERY.code == undefined) {
         // how does this happen, try again
         route_oauthPrompt(req, res, "Epic error on Strava's end. Please try again.")
+        return
     }
 
     const REQUIRED_SCOPES = ["read", "activity:write", "activity:read_all"]

@@ -73,4 +73,12 @@ module.exports = class Queue {
     size() {
         return this.count
     }
+
+    /**
+     * Clears the queue of all items.
+     * WARNING this can NOT be undone!
+     */
+    clear() {
+        this.head = null
+    }
 }
