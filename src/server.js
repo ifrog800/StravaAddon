@@ -15,7 +15,8 @@ const HTML_BUILDER = require(`./html_builder.json`)
 const OAUTH_URL = `https://www.strava.com/oauth/authorize?response_type=code&client_id=${SETTINGS.client_id}&redirect_uri=http://localhost:${SETTINGS.port}/strava/oauth&scope=read,activity:read_all,activity:write&approval_prompt=force`
 const CACHE = {
     user_oauth: {},
-    geocode: {}
+    geocode: {},
+    weather: {}
 }
 // SCHEMA: [ USER_ID, ACTIVITY_ID ]
 const ACTIVITY_QUEUE = new Queue()
@@ -175,6 +176,48 @@ function zeroPad(number, places = 2) {
 
 
 /**
+ * Turns a degree relative to North into a formated string to nearest 45 degree angle.
+ * ↖↑↗
+ * ←↻→
+ * ↙↓↘
+ * @param {Number} deg expecting 0-360 degrees but out or range also work
+ * @returns A formated string w/ arrow, degree and label
+ */
+function format_degreeToNESF(deg) {
+    if (typeof deg != "number") {
+        return ""
+    }
+    if (deg < 0) {
+        deg = 360 - ((-1 * deg) % 360)
+    }
+    if (360 < deg) {
+        deg = deg % 360
+    }
+    switch (Math.round(deg / 360 * 8)) {
+        case 0:
+        case 8:
+            return `↑ ${deg}°N`
+        case 1:
+            return `↗ ${deg}°NE`
+        case 2:
+            return `→ ${deg}°E`
+        case 3:
+            return `↘ ${deg}°SE`
+        case 4:
+            return `↓ ${deg}°S`
+        case 5:
+            return `↙ ${deg}°SW`
+        case 6:
+            return `← ${deg}°W`
+        case 7:
+            return `↖ ${deg}°NW`
+        default:
+            return `↻↻↻ °Error`
+    }
+}
+
+
+/**
  * Formats seconds in to a human readable time string.
  * @param {Number} seconds the number of seconds that needs to be converted
  * @returns A string in MM:SS or hh:MM:SS format
@@ -214,6 +257,70 @@ function format_mpsToPaceMi(mps) {
 
 
 /**
+ * Gets the historical weather data of a location on one day.
+ * @param {String} location zipcode | locality, state | coordinate
+ * @param {String} date fomated in yyyy-MM-dd to retrive one day's worth of data
+ * @param {String} type zipcode | locality | coord
+ * @returns JSON data | string error
+ */
+function getVisualCrossing(location, date, type) {
+    return new Promise((res, err) => {
+        const httpPath = `/VisualCrossingWebServices/rest/services/timeline/${location}/${date}/${date}`
+        const query = `?unitGroup=us&key=${SETTINGS.api.visualcrossing}&contentType=json`
+        const cacheFile = `${SETTINGS.data_dir}/weather/${type}/${location}/${date}.json${SETTINGS.gzip_comp_data ? ".gz" : ""}`
+
+        if (CACHE.weather[cacheFile]) {
+            // from the cache
+            return res(CACHE.weather[cacheFile])
+        } else if (FS.existsSync(cacheFile)) {
+            // from the file system
+            readJsonFile(cacheFile)
+                .then(data => {
+                    CACHE.weather[cacheFile] = data
+                    res(data)
+                })
+                .catch(e => {
+                    console.error(`[getVisualCrossing] failed to read cache file`)
+                    console.error(e)
+                })
+        } else {
+            // fetches the data from API
+            const REQUEST = HTTPS.request({
+                host: "weather.visualcrossing.com",
+                path: httpPath + query
+            }, response => {
+                let str = ""
+                response.on("data", chunk => str += chunk)
+                response.on("end", () => {
+                    try {
+                        const DATA = JSON.parse(str)
+                        const split = cacheFile.split("/")
+                        const file = split.pop()
+
+                        writeFileJson(split.join("/"), file, JSON.stringify(DATA))
+                        CACHE.weather[cacheFile] = DATA
+                        return res(DATA)
+                    } catch (error) {
+                        console.error(`${new Date()}`)
+                        console.error(error)
+                        return err(`[getVisualCrossing] [fetch] failed to parse response from "https://weather.visualcrossing.com${httpPath + query}" into JSON`)
+                    }
+                })
+            })
+
+            REQUEST.on("error", (error) => {
+                console.error(`${new Date()}`)
+                console.error(error)
+                return err(`${new Date()} [getVisualCrossing] error in https request`)
+            })
+
+            REQUEST.end()
+        }
+    })
+}
+
+
+/**
  * Reverse geocode's the coordinate by checking the cache, file system, and finally fetches it.
  * @param {Number} pLat The coordinate's latitude.
  * @param {Number} pLon The coordinate's longitude.
@@ -221,9 +328,9 @@ function format_mpsToPaceMi(mps) {
  */
 function getGeocode(pLat, pLon) {
     return new Promise((res, err) => {
-        // sanitizes coordinate to 3 decimal places
-        const lon = (Math.floor(pLon * 1000) / 1000)
-        const lat = (Math.floor(pLat * 1000) / 1000)
+        // sanitizes coordinate to 2 decimal places
+        const lon = (Math.floor(pLon * 100) / 100)
+        const lat = (Math.floor(pLat * 100) / 100)
         const cacheFile = `${SETTINGS.data_dir}/geocode/${Math.floor(lat)}_${Math.floor(lon)}/${lat}_${lon}.json${SETTINGS.gzip_comp_data ? ".gz" : ""}`
 
         if (CACHE.geocode[cacheFile]) {
@@ -268,7 +375,7 @@ function getGeocode(pLat, pLon) {
             REQUEST.on("error", (error) => {
                 console.error(`${new Date()}`)
                 console.error(error)
-                return err(`${new Date()} [getJson] error in https request`)
+                return err(`${new Date()} [getGeocode] error in https request`)
             })
 
             REQUEST.end()
@@ -384,42 +491,147 @@ function getStravaAPI(endpoint, userid = null) {
 }
 
 
+function putStravaActivity(userid, activityid, newData) {
+    return new Promise((res, err) => {
+        const REQUEST = HTTPS.request({
+            host: "www.strava.com",
+            path: `/api/v3/activities/${activityid}`,
+            method: "PUT"
+        }, response => {
+            let str = ""
+            response.on("data", chunk => str += chunk)
+            response.on("end", () => {
+                try {
+                    const DATA = JSON.parse(str)
+                    if (DATA.errors) {
+                        console.debug(DATA)
+                        return
+                    }
+
+                    writeFileJson(`${SETTINGS.data_dir}/user/${userid}/activities/`, activityid, JSON.stringify(DATA))
+                    res("updated activity " + activityid)
+                } catch (error) {
+                    console.error(`${new Date()}`)
+                    console.error(error)
+                }
+            })
+        })
+        REQUEST.on("error", error => {
+            console.error(`${new Date()} [putStravaActivity] ${error}`)
+            console.error(error)
+            err(`${new Date()} [putStravaActivity] ${error}`)
+        })
+
+        getUserOauth(userid)
+            .then(user => {
+                REQUEST.setHeader("authorization", `Bearer ${user.access_token}`)
+                REQUEST.write(JSON.stringify(newData))
+                REQUEST.end()
+            })
+            .catch(error => {
+                console.error(`${new Date()} [putStravaActivity] [getUserOauth] ${error}`)
+                err(`[putStravaActivity] [getUserOauth] ${error}`)
+            })
+    })
+}
+
+
 /**
  * Does processing of the activities in the queue one at a time.
  * @param {String} activityid the activity id
  */
 function processActivities(userid, activityid) {
+    /*
+    <original description>
+    [SPLITS]
+    distance    time    pace
+    metres      MM:ss   "/km  "/mi
+    [WEATHER]
+    xx.x°F <condition>, feels like xx.x°F, Humidity xx.xx%, Wind xx.xmph from ↻ xx°NE w/ xx.xmph gusts, Clouds Cover xx.x%, UV Index x
+    */
+    let finalDescription
+    let date
+    let activityDate;
     getStravaAPI("activities/" + activityid + "?include_all_efforts=0", userid)
-        .then(data => {
-            // todo finish
-            writeFileJson(`${SETTINGS.data_dir}/user/${userid}/activities/`, activityid, JSON.stringify(data))
+        .then(dataActivity => {
+            writeFileJson(`${SETTINGS.data_dir}/user/${userid}/activities/`, activityid, JSON.stringify(dataActivity))
 
-            // todo splits, weather, update, save updated
-            let finalDescription = data.description + "\n[SPLITS]\n"
-            for (const index in data.laps) {
-                const LAP = data.laps[index]
+            finalDescription = dataActivity.description + "\n[SPLITS]\n"
+            for (const index in dataActivity.laps) {
+                const LAP = dataActivity.laps[index]
                 finalDescription += `[${zeroPad(index)}] ${LAP.distance}m\t> ${format_secToString(LAP.elapsed_time)}\t@ ${format_mpsToPaceKm(LAP.average_speed)}/km\t${format_mpsToPaceMi(LAP.average_speed)}/mi\n`
             }
-            console.log(finalDescription)
-            /*
-            [SPLITS]
-            distance    time    pace
-            metres      MM:ss   "/km  "/mi
-            
-            */
 
-            if (data.start_latlng && data.end_latlng) {
-                // has gps
-                const sLat = data.start_latlng[0]
-                const sLon = data.start_latlng[1]
-                const eLat = data.end_latlng[0]
-                const eLon = data.end_latlng[1]
 
-                console.log(data.start_latlng, data.end_latlng)
+            if (dataActivity.start_latlng && dataActivity.end_latlng) {
+                // has gps so process gps data into weather data
+                date = new Date(dataActivity.start_date)
+                activityDate = dataActivity.start_date.split("T")[0]
+                const sLat = dataActivity.start_latlng[0]
+                const sLon = dataActivity.start_latlng[1]
+                const eLat = dataActivity.end_latlng[0]
+                const eLon = dataActivity.end_latlng[1]
+
+                return getGeocode(sLat, sLon)
+            } else {
+                return Promise.resolve({ "strava_addon_skip": true })
             }
         })
+        .then(dataGeocode => {
+            if (dataGeocode["strava_addon_skip"]) {
+                return Promise.resolve({ "strava_addon_skip": true })
+            }
+
+            let location, type;
+            if (dataGeocode["countryCode"] != "US") {
+                // use coordinate
+                location = `${dataGeocode.latitude}%2C${dataGeocode.longitude}`
+                type = "coords"
+            } else if (dataGeocode["postcode"]) {
+                // find weather by zip code
+                location = `${dataGeocode.postcode}`
+                type = "postcode"
+            } else {
+                // some places in USA dont have zip code try to use (locality, principalSubdivision)
+                location = `${dataGeocode.locality.replace(/ +/gi, "%20")}%2C${dataGeocode.principalSubdivision.replace(/ +/gi, "%20")}`
+                type = "locality"
+            }
+
+            // calls weather api using optimized location for optimal cache hitting
+            return getVisualCrossing(location, activityDate, type)
+        })
+        .then(dataWeather => {
+            if (dataWeather["strava_addon_skip"]) {
+                return putStravaActivity(userid, activityid, { "description": finalDescription })
+            }
+
+            // process weather data at start of activity
+            const roundedHour = date.getHours() + (date.getMinutes() >= 30 ? 1 : 0)
+            const w = dataWeather.days[0].hours[roundedHour]
+
+            finalDescription += "\n[WEATHER]\n"
+            finalDescription += `${w.temp}°F ${w.conditions}, feels like ${w.feelslike}°F, Humidity ${w.humidity}%, `
+            finalDescription += `Wind ${w.windspeed}mph from ${format_degreeToNESF(w.winddir)} w/ ${w.windgust}mph gusts, `
+            finalDescription += `Clouds Cover ${w.cloudcover}%, UV Index ${w.uvindex}`
+            if (w.precip) {
+                finalDescription += `${w.precip}" rain\n`
+            } else if (w.snow) {
+                finalDescription += `${w.snow}" new snow, ${w.snowdepth}" total snow\n`
+            } else {
+                finalDescription += "\n"
+            }
+
+            return putStravaActivity(userid, activityid, {
+                "name": SETTINGS.weather_icons[w.icon] + " " + tmp_activity.name,
+                "description": finalDescription
+            })
+        })
+        .then(data => {
+            // done with update
+            console.log(`[processActivities] done updating activity activity/${activityid}`)
+        })
         .catch(e => {
-            console.error(`${new Date()} [processActivities] failed to get activity/${activityid}`)
+            console.error(`${new Date()} [processActivities] something broke while processig activity/${activityid}`)
             console.error(e)
         })
         .finally(() => {
@@ -463,6 +675,7 @@ function getNewActivities() {
                     FS.mkdirSync(BASE_FS, { recursive: true })
 
                     for (let i = 0; i < res.length; i++) {
+                        // todo incoperate gzip setting after done developing
                         if (FS.existsSync(BASE_FS + res[i].id + ".json")) {
                             continue
                         }

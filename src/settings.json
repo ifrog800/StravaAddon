@@ -1,10 +1,32 @@
- {
+{
     "port": 4747,
     "client_id": 11111,
     "client_secret": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
     "data_dir": "./.strava_addon_data",
     "gzip_comp_data": false,
     "api": {
-        "bigdatacloud": "API_KEY_HERE"
+        "bigdatacloud": "API_KEY_HERE",
+        "visualcrossing": "API_KEY_HERE"
+    },
+    "weather_icons": {
+        "clear-day": "☀️",
+        "clear-night": "🌙",
+        "cloudy": "☁️",
+        "fog": "🌫️",
+        "hail": "⚪",
+        "partly-cloudy-day": "⛅",
+        "partly-cloudy-night": "",
+        "rain-snow-showers-day": "🌨️",
+        "rain-snow-showers-night": "🌨️",
+        "rain-snow": "🌨️",
+        "rain": "🌧️",
+        "showers-day": "🌧️",
+        "showers-night": "🌧️",
+        "snow": "❄️",
+        "thunder-rain": "⛈️",
+        "thunder-showers-day": "⛈️",
+        "thunder-showers-night": "⛈️",
+        "thunder": "⚡",
+        "wind": "💨"
     }
 }
