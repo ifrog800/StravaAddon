@@ -14,7 +14,8 @@ const SETTINGS = require(`./ignore.json`)
 const HTML_BUILDER = require(`./html_builder.json`)
 const OAUTH_URL = `https://www.strava.com/oauth/authorize?response_type=code&client_id=${SETTINGS.client_id}&redirect_uri=http://localhost:${SETTINGS.port}/strava/oauth&scope=read,activity:read_all,activity:write&approval_prompt=force`
 const CACHE = {
-    user_oauth: {}
+    user_oauth: {},
+    geocode: {}
 }
 // SCHEMA: [ USER_ID, ACTIVITY_ID ]
 const ACTIVITY_QUEUE = new Queue()
@@ -43,7 +44,7 @@ function writeFileJson(dir = SETTINGS.data_dir, fileName = "_ERROR_", data = "ST
         if (!fileName.endsWith(".json")) {
             fileName += ".json"
         }
-        FS.writeFile(dir + fileName, data, "utf-8", () => { })
+        FS.writeFile(dir + "/" + fileName, data, "utf-8", () => { })
         return
     }
 
@@ -57,7 +58,7 @@ function writeFileJson(dir = SETTINGS.data_dir, fileName = "_ERROR_", data = "ST
 
     // .json.gz file
     const gzip = ZLIB.createGzip({ level: 9 })
-    gzip.pipe(FS.createWriteStream(dir + fileName))
+    gzip.pipe(FS.createWriteStream(dir + "/" + fileName))
     gzip.end(data)
 }
 
@@ -158,6 +159,131 @@ function getUserOauth(userid, isGzip = SETTINGS.gzip_comp_data) {
 }
 
 
+/**
+ * Zero pads a number based on total number of decimal places.
+ * @param {Number} number the number that will be zero padded
+ * @param {Number} places how many places to zero pad on the left
+ * @returns A string of the newly left zero padded number.
+ */
+function zeroPad(number, places = 2) {
+    const stringNum = (number + "")
+    if (stringNum.length < places) {
+        return "0".repeat(places - stringNum.length) + stringNum
+    }
+    return number
+}
+
+
+/**
+ * Formats seconds in to a human readable time string.
+ * @param {Number} seconds the number of seconds that needs to be converted
+ * @returns A string in MM:SS or hh:MM:SS format
+ */
+function format_secToString(seconds) {
+    const minsInDecimal = seconds / 60
+    const hh = Math.floor(minsInDecimal / 60)
+    const MM = Math.floor(minsInDecimal)
+    const SS = Math.round((minsInDecimal - MM) * 60)
+    if (hh != 0) {
+        return `${hh}:${zeroPad(MM % 60)}:${zeroPad(SS % 60)}`
+    }
+    return `${MM}:${zeroPad(SS)}`
+}
+
+
+/**
+ * Turns metres per second in to km pace.
+ * @param {Number} mps metres per second
+ * @returns formatted string
+ * @see format_secToString()
+ */
+function format_mpsToPaceKm(mps) {
+    return format_secToString(1000 / mps)
+}
+
+
+/**
+ * Turns metres per second in to mile pace.
+ * @param {Number} mps metres per second
+ * @returns formatted string
+ * @see format_secToString()
+ */
+function format_mpsToPaceMi(mps) {
+    return format_secToString(1609.34 / mps)
+}
+
+
+/**
+ * Reverse geocode's the coordinate by checking the cache, file system, and finally fetches it.
+ * @param {Number} pLat The coordinate's latitude.
+ * @param {Number} pLon The coordinate's longitude.
+ * @returns The api response from https://api.bigdatacloud.net/data/reverse-geocode
+ */
+function getGeocode(pLat, pLon) {
+    return new Promise((res, err) => {
+        // sanitizes coordinate to 3 decimal places
+        const lon = (Math.floor(pLon * 1000) / 1000)
+        const lat = (Math.floor(pLat * 1000) / 1000)
+        const cacheFile = `${SETTINGS.data_dir}/geocode/${Math.floor(lat)}_${Math.floor(lon)}/${lat}_${lon}.json${SETTINGS.gzip_comp_data ? ".gz" : ""}`
+
+        if (CACHE.geocode[cacheFile]) {
+            // from the cache
+            return res(CACHE.geocode[cacheFile])
+        } else if (FS.existsSync(cacheFile)) {
+            // from the file system
+            readJsonFile(cacheFile)
+                .then(data => {
+                    CACHE.geocode[cacheFile] = data
+                    res(data)
+                })
+                .catch(e => {
+                    console.error(`[getGeocode] failed to read cache file`)
+                    console.error(e)
+                })
+        } else {
+            // fetches the data from API
+            const REQUEST = HTTPS.request({
+                host: "api.bigdatacloud.net",
+                path: `/data/reverse-geocode?longitude=${lon}&latitude=${lat}&localityLanguage=en&key=${SETTINGS.api.bigdatacloud}`
+            }, response => {
+                let str = ""
+                response.on("data", chunk => str += chunk)
+                response.on("end", () => {
+                    try {
+                        const DATA = JSON.parse(str)
+                        const split = cacheFile.split("/")
+                        const file = split.pop()
+
+                        writeFileJson(split.join("/"), file, JSON.stringify(DATA))
+                        CACHE.geocode[cacheFile] = DATA
+                        return res(DATA)
+                    } catch (error) {
+                        console.error(`${new Date()}`)
+                        console.error(error)
+                        return err(`[getGeocode] [fetch] failed to parse response from "https://api.bigdatacloud.net/data/reverse-geocode?longitude=${lon}&latitude=${lat}&localityLanguage=en&key=${SETTINGS.API.bigdatacloud} into JSON`)
+                    }
+                })
+            })
+
+            REQUEST.on("error", (error) => {
+                console.error(`${new Date()}`)
+                console.error(error)
+                return err(`${new Date()} [getJson] error in https request`)
+            })
+
+            REQUEST.end()
+        }
+    })
+}
+
+
+/**
+ * Updates the refresh token & access_token in the 'strava_oauth' folder.
+ * 
+ * @param {String} userid The user id.
+ * @param {String} refreshToken The refresh token of the athlete.
+ * @returns data JSON | error String
+ */
 function updateTokens(userid, refreshToken) {
     return new Promise((res, err) => {
         console.log(`/api/v3/oauth/token?client_id=${SETTINGS.client_id}&client_secret=${SETTINGS.client_secret}&grant_type=refresh_token&refresh_token=${refreshToken}`)
@@ -216,7 +342,7 @@ function getStravaAPI(endpoint, userid = null) {
         // todo real endpoint uses HTTPS
         // const REQUEST = HTTPS.request({
         const REQUEST = HTTP.request({
-            // host: "https://www.strava.com",
+            // host: "www.strava.com",
             // path: "/api/v3/" + endpoint
 
             // todo dev test server
@@ -263,10 +389,34 @@ function getStravaAPI(endpoint, userid = null) {
  * @param {String} activityid the activity id
  */
 function processActivities(userid, activityid) {
-    getStravaAPI("activities/" + activityid, userid)
+    getStravaAPI("activities/" + activityid + "?include_all_efforts=0", userid)
         .then(data => {
             // todo finish
             writeFileJson(`${SETTINGS.data_dir}/user/${userid}/activities/`, activityid, JSON.stringify(data))
+
+            // todo splits, weather, update, save updated
+            let finalDescription = data.description + "\n[SPLITS]\n"
+            for (const index in data.laps) {
+                const LAP = data.laps[index]
+                finalDescription += `[${zeroPad(index)}] ${LAP.distance}m\t> ${format_secToString(LAP.elapsed_time)}\t@ ${format_mpsToPaceKm(LAP.average_speed)}/km\t${format_mpsToPaceMi(LAP.average_speed)}/mi\n`
+            }
+            console.log(finalDescription)
+            /*
+            [SPLITS]
+            distance    time    pace
+            metres      MM:ss   "/km  "/mi
+            
+            */
+
+            if (data.start_latlng && data.end_latlng) {
+                // has gps
+                const sLat = data.start_latlng[0]
+                const sLon = data.start_latlng[1]
+                const eLat = data.end_latlng[0]
+                const eLon = data.end_latlng[1]
+
+                console.log(data.start_latlng, data.end_latlng)
+            }
         })
         .catch(e => {
             console.error(`${new Date()} [processActivities] failed to get activity/${activityid}`)
@@ -275,7 +425,7 @@ function processActivities(userid, activityid) {
         .finally(() => {
             const next = ACTIVITY_QUEUE.next()
             if (next && next.length == 2) {
-                processActivities(next[0], next[1])
+                setTimeout(() => { processActivities(next[0], next[1]) }, 1000)
             }
         })
 }
