@@ -546,8 +546,8 @@ function processActivities(userid, activityid) {
     /*
     <original description>
     [SPLITS]
-    distance    time    pace
-    metres      MM:ss   "/km  "/mi
+    distance    elapsed moving  pace
+    metres      MM:ss   MM:ss   "/km  "/mi
     [WEATHER]
     xx.x°F <condition>, feels like xx.x°F, Humidity xx.xx%, Wind xx.xmph from ↻ xx°NE w/ xx.xmph gusts, Clouds Cover xx.x%, UV Index x
     */
@@ -567,7 +567,7 @@ function processActivities(userid, activityid) {
             finalDescription = dataActivity.description + "\n[SPLITS]\n"
             for (const index in dataActivity.laps) {
                 const LAP = dataActivity.laps[index]
-                finalDescription += `[${zeroPad(index)}] ${LAP.distance}m\t> ${format_secToString(LAP.elapsed_time)}\t@ ${format_mpsToPaceKm(LAP.average_speed)}/km\t${format_mpsToPaceMi(LAP.average_speed)}/mi\n`
+                finalDescription += `[${zeroPad(index)}] ${LAP.distance}m\t> ${format_secToString(LAP.elapsed_time)}, ${format_secToString(LAP.moving_time)}\t@ ${format_mpsToPaceKm(LAP.average_speed)}/km\t${format_mpsToPaceMi(LAP.average_speed)}/mi\n`
             }
 
 
