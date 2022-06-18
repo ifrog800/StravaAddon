@@ -4,6 +4,7 @@
     "client_secret": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
     "data_dir": "./.strava_addon_data",
     "gzip_comp_data": false,
+    "description_ending": "<<《Strava Addon》>>",
     "api": {
         "bigdatacloud": "API_KEY_HERE",
         "visualcrossing": "API_KEY_HERE"

@@ -4,23 +4,27 @@ const HTTPS = require("https")
 const URL = require("url")
 const ZLIB = require("zlib")
 
+const Logger = require("./Logger")
 const Queue = require(`./Queue.js`)
 
 // actual settings location
-// const SETTINGS = require(`${__dirname}/settings.json`)
+const SETTINGS = require(`${__dirname}/settings.json`)
 
-// todo dev settings location
-const SETTINGS = require(`./ignore.json`)
-const HTML_BUILDER = require(`./html_builder.json`)
+const HTML_BUILDER = require(`${__dirname}/html_builder.json`)
 const OAUTH_URL = `https://www.strava.com/oauth/authorize?response_type=code&client_id=${SETTINGS.client_id}&redirect_uri=http://localhost:${SETTINGS.port}/strava/oauth&scope=read,activity:read_all,activity:write&approval_prompt=force`
+// creates a program memory cache to speed up file system acsess, WARNING it currently never gets cleared
 const CACHE = {
     user_oauth: {},
     geocode: {},
-    weather: {}
+    weather: {},
+    d: new Date()
 }
 // SCHEMA: [ USER_ID, ACTIVITY_ID ]
 const ACTIVITY_QUEUE = new Queue()
 
+// the program logger that logs to file and terminal
+const l = new Logger(SETTINGS.data_dir + `/logs/`)
+l.i("initializing...")
 
 /**
  * Saves a JSON object in String form onto the file system.
@@ -45,7 +49,8 @@ function writeFileJson(dir = SETTINGS.data_dir, fileName = "_ERROR_", data = "ST
         if (!fileName.endsWith(".json")) {
             fileName += ".json"
         }
-        FS.writeFile(dir + "/" + fileName, data, "utf-8", () => { })
+        FS.writeFile(`${dir}/${fileName}`, data, "utf-8", () => { })
+        l.i(`updated file: ${dir}/${fileName}`, `[writeFileJson]`, true)
         return
     }
 
@@ -61,6 +66,7 @@ function writeFileJson(dir = SETTINGS.data_dir, fileName = "_ERROR_", data = "ST
     const gzip = ZLIB.createGzip({ level: 9 })
     gzip.pipe(FS.createWriteStream(dir + "/" + fileName))
     gzip.end(data)
+    l.i(`updated file: ${dir}/${fileName}`, `[writeFileJson]`, true)
 }
 
 
@@ -81,6 +87,8 @@ function readJsonFile(location, isGzip = SETTINGS.gzip_comp_data) {
             return err(`[readJsonFile] file @ "${location}" does not exist`)
         }
 
+        l.i(`read file @ ${location}`, `[readJsonFile]`, true)
+
         // decompresses .json.gz file
         if (isGzip) {
             const UNZIP = ZLIB.createUnzip()
@@ -99,8 +107,7 @@ function readJsonFile(location, isGzip = SETTINGS.gzip_comp_data) {
         // regular .json file
         FS.readFile(location, (error, buffer) => {
             if (error) {
-                console.error(`${new Date()}`)
-                console.error(error)
+                l.e(error, `[readJsonFile] read file error @ "${error.path}" | ${error.message}`)
                 return res(`[readJsonFile] error reading file @ "${error.path}" | ${error.message}`)
             }
             return res(JSON.parse(buffer.toString()))
@@ -124,6 +131,7 @@ function getUserOauth(userid, isGzip = SETTINGS.gzip_comp_data) {
         }
 
         if (CACHE.user_oauth[userid]) {
+            l.i(`[getUserOauth] in cache ${userid}`)
             if (CACHE.user_oauth[userid].expires_at - (60 * 60) < (Math.floor(new Date().getTime() / 1000.0) + (60 * 60))) {
                 updateTokens(userid, CACHE.user_oauth[userid].refresh_token)
                     .then(data => {
@@ -137,6 +145,7 @@ function getUserOauth(userid, isGzip = SETTINGS.gzip_comp_data) {
             return
         }
 
+        l.i(`[getUserOauth] reading ${userid} from file...`)
         readJsonFile(SETTINGS.data_dir + "/strava_oauth/" + userid + (isGzip ? ".json.gz" : ".json"), isGzip)
             .then(data => {
                 if (data.expires_at < (Math.floor(new Date().getTime() / 1000.0) + (60 * 60) + (60 * 60))) {
@@ -153,7 +162,7 @@ function getUserOauth(userid, isGzip = SETTINGS.gzip_comp_data) {
                 }
             })
             .catch(error => {
-                console.error(`${new Date()} [getUserOauth] ${error}`)
+                l.e(error, `[getUserOauth]`)
                 return err(`[getUserOauth] error: ${error}`)
             })
     })
@@ -280,8 +289,7 @@ function getVisualCrossing(location, date, type) {
                     res(data)
                 })
                 .catch(e => {
-                    console.error(`[getVisualCrossing] failed to read cache file`)
-                    console.error(e)
+                    l.e(e, `[getVisualCrossing] failed to read cache file`)
                 })
         } else {
             // fetches the data from API
@@ -301,17 +309,15 @@ function getVisualCrossing(location, date, type) {
                         CACHE.weather[cacheFile] = DATA
                         return res(DATA)
                     } catch (error) {
-                        console.error(`${new Date()}`)
-                        console.error(error)
-                        return err(`[getVisualCrossing] [fetch] failed to parse response from "https://weather.visualcrossing.com${httpPath + query}" into JSON`)
+                        l.e(error, `[getVisualCrossing] [fetch] failed to parse response from "https://weather.visualcrossing.com${httpPath + query}" into JSON [${str}]`)
+                        return err(`[getVisualCrossing] [fetch] failed to parse response from "https://weather.visualcrossing.com${httpPath + query}" into JSON ${error}`)
                     }
                 })
             })
 
             REQUEST.on("error", (error) => {
-                console.error(`${new Date()}`)
-                console.error(error)
-                return err(`${new Date()} [getVisualCrossing] error in https request`)
+                l.e(error, `[getVisualCrossing] error in https request`)
+                return err(`[getVisualCrossing] error in https request ${error}`)
             })
 
             REQUEST.end()
@@ -335,20 +341,23 @@ function getGeocode(pLat, pLon) {
 
         if (CACHE.geocode[cacheFile]) {
             // from the cache
+            l.i(`[getGeocode] reading cache for ${lat}, ${lon}`)
             return res(CACHE.geocode[cacheFile])
         } else if (FS.existsSync(cacheFile)) {
             // from the file system
+            l.i(`[getGeocode] reading ${cacheFile}`)
             readJsonFile(cacheFile)
                 .then(data => {
                     CACHE.geocode[cacheFile] = data
-                    res(data)
+                    return res(data)
                 })
                 .catch(e => {
-                    console.error(`[getGeocode] failed to read cache file`)
-                    console.error(e)
+                    l.e(e, `[getGeocode] failed to read cached file`)
+                    return err(`[getGeocode] failed to read cached file ${e}`)
                 })
         } else {
             // fetches the data from API
+            l.i(`[getGeocode] requesting https://api.bigdatacloud.net/data/reverse-geocode?longitude=${lon}&latitude=${lat}&localityLanguage=en&key=${SETTINGS.api.bigdatacloud}`)
             const REQUEST = HTTPS.request({
                 host: "api.bigdatacloud.net",
                 path: `/data/reverse-geocode?longitude=${lon}&latitude=${lat}&localityLanguage=en&key=${SETTINGS.api.bigdatacloud}`
@@ -365,17 +374,15 @@ function getGeocode(pLat, pLon) {
                         CACHE.geocode[cacheFile] = DATA
                         return res(DATA)
                     } catch (error) {
-                        console.error(`${new Date()}`)
-                        console.error(error)
-                        return err(`[getGeocode] [fetch] failed to parse response from "https://api.bigdatacloud.net/data/reverse-geocode?longitude=${lon}&latitude=${lat}&localityLanguage=en&key=${SETTINGS.API.bigdatacloud} into JSON`)
+                        l.e(error, `[getGeocode] [fetch] failed to parse response from "https://api.bigdatacloud.net/data/reverse-geocode?longitude=${lon}&latitude=${lat}&localityLanguage=en&key=${SETTINGS.API.bigdatacloud}" into JSON`)
+                        return err(`[getGeocode] [fetch] failed to parse response from "https://api.bigdatacloud.net/data/reverse-geocode?longitude=${lon}&latitude=${lat}&localityLanguage=en&key=${SETTINGS.API.bigdatacloud}" into JSON, ${error}`)
                     }
                 })
             })
 
             REQUEST.on("error", (error) => {
-                console.error(`${new Date()}`)
-                console.error(error)
-                return err(`${new Date()} [getGeocode] error in https request`)
+                l.e(error, `[getGeocode] error in https request`)
+                return err(`[getGeocode] error in https request ${error}`)
             })
 
             REQUEST.end()
@@ -393,13 +400,13 @@ function getGeocode(pLat, pLon) {
  */
 function updateTokens(userid, refreshToken) {
     return new Promise((res, err) => {
-        console.log(`/api/v3/oauth/token?client_id=${SETTINGS.client_id}&client_secret=${SETTINGS.client_secret}&grant_type=refresh_token&refresh_token=${refreshToken}`)
+        l.i(`/api/v3/oauth/token?client_id=${SETTINGS.client_id}&client_secret=${SETTINGS.client_secret}&grant_type=refresh_token&refresh_token=${refreshToken}`, `[updateTokens]`)
         const REQUEST = HTTPS.request({
             host: "www.strava.com",
             path: `/api/v3/oauth/token?client_id=${SETTINGS.client_id}&client_secret=${SETTINGS.client_secret}&grant_type=refresh_token&refresh_token=${refreshToken}`,
             method: "POST"
         }, response => {
-            console.log(`/api/v3/oauth/token?client_id=${SETTINGS.client_id}&client_secret=${SETTINGS.client_secret}&grant_type=refresh_token&refresh_token=${refreshToken}`)
+            l.i(`/api/v3/oauth/token?client_id=${SETTINGS.client_id}&client_secret=${SETTINGS.client_secret}&grant_type=refresh_token&refresh_token=${refreshToken}`, `[updateTokens]`)
             let str = ""
             response.on("data", chunk => str += chunk)
             response.on("end", () => {
@@ -407,21 +414,20 @@ function updateTokens(userid, refreshToken) {
                     const DATA = JSON.parse(str)
                     if (DATA.errors) {
                         // error with getting refresh token
-                        console.debug(DATA)
+                        l.fatal(DATA, `[updateTokens] failed geting refresh tokens`)
                         return
                     }
                     writeFileJson(SETTINGS.data_dir + "/strava_oauth/", userid, str)
                     res(DATA)
                 } catch (error) {
-                    console.error(`${new Date()}`)
-                    console.error(error)
-                    err(error)
+                    l.e(error, `[updateTokens] failed parsing result into JSON`)
+                    err(`[updateTokens] failed parsing result into JSON ${error}`)
                 }
             })
         })
         REQUEST.on("error", error => {
-            console.error(`${new Date()} [updateTokens] error:`)
-            console.error(error)
+            l.e(error, `[updateTokens] http POST error`)
+            res(`[updateTokens] http POST error`)
         })
         REQUEST.end()
     })
@@ -446,16 +452,10 @@ function getStravaAPI(endpoint, userid = null) {
             return err("missing user id")
         }
 
-        // todo real endpoint uses HTTPS
-        // const REQUEST = HTTPS.request({
-        const REQUEST = HTTP.request({
-            // host: "www.strava.com",
-            // path: "/api/v3/" + endpoint
-
-            // todo dev test server
-            host: "localhost",
-            port: 4848,
-            path: "/pretend/path/to/api/endpoint"
+        l.i(`[getStravaAPI] requesting: https://www.strava.com/api/v3/${endpoint} as ${userid}`)
+        const REQUEST = HTTPS.request({
+            host: "www.strava.com",
+            path: "/api/v3/" + endpoint
         }, response => {
             let str = ""
             response.on("data", chunk => str += chunk)
@@ -464,18 +464,16 @@ function getStravaAPI(endpoint, userid = null) {
                     const DATA = JSON.parse(str)
                     return res(DATA)
                 } catch (error) {
-                    console.error(`${new Date()}`)
-                    console.error(error)
-                    return err(`[getJson] failed to parse response from "https://www.strava.com/api/v3/${endpoint}" into JSON`)
+                    l.e(`[getStravaAPI] failed to parse response from "https://www.strava.com/api/v3/${endpoint}" into JSON`)
+                    return err(`[getStravaAPI] failed to parse response from "https://www.strava.com/api/v3/${endpoint}" into JSON ${error}`)
                 }
             })
         })
 
         REQUEST.setHeader("accept", "application/json")
         REQUEST.on("error", (error) => {
-            console.error(`${new Date()}`)
-            console.error(error)
-            return err(`${new Date()} [getJson] error in https request`)
+            l.e(`[getStravaAPI] error in https request`)
+            return err(`[getStravaAPI] error in https request ${error}`)
         })
 
         getUserOauth(userid)
@@ -484,7 +482,7 @@ function getStravaAPI(endpoint, userid = null) {
                 REQUEST.end()
             })
             .catch(error => {
-                console.error(`${new Date()} [getStravaAPI] ${error}`)
+                l.e(error, `[getStravaAPI] failed to get user ${userid} oauth`)
                 err(`[getStravaAPI] ${error}`)
             })
     })
@@ -493,10 +491,14 @@ function getStravaAPI(endpoint, userid = null) {
 
 function putStravaActivity(userid, activityid, newData) {
     return new Promise((res, err) => {
+        l.i(`[putStravaActivity] updating ${userid}'s activity: ${activityid} with ${JSON.stringify(newData)}`)
         const REQUEST = HTTPS.request({
             host: "www.strava.com",
             path: `/api/v3/activities/${activityid}`,
-            method: "PUT"
+            method: "PUT",
+            headers: {
+                "Content-Type": "application/json"
+            }
         }, response => {
             let str = ""
             response.on("data", chunk => str += chunk)
@@ -504,22 +506,22 @@ function putStravaActivity(userid, activityid, newData) {
                 try {
                     const DATA = JSON.parse(str)
                     if (DATA.errors) {
-                        console.debug(DATA)
-                        return
+                        l.d(DATA, `[putStravaActivity] error updating activity data`)
+                        l.dump(newData, `[putStravaActivity].newData`)
+                        return err(`[putStravaActivity] error updating activity data`)
                     }
 
                     writeFileJson(`${SETTINGS.data_dir}/user/${userid}/activities/`, activityid, JSON.stringify(DATA))
                     res("updated activity " + activityid)
                 } catch (error) {
-                    console.error(`${new Date()}`)
-                    console.error(error)
+                    l.e(`[getStravaAPI] failed to parse response from PUT "https://www.strava.com/api/v3/activities/${activityid}" into JSON`)
+                    return err(`[getStravaAPI] failed to parse response from PUT "https://www.strava.com/api/v3/activities/${activityid}" into JSON ${error}`)
                 }
             })
         })
         REQUEST.on("error", error => {
-            console.error(`${new Date()} [putStravaActivity] ${error}`)
-            console.error(error)
-            err(`${new Date()} [putStravaActivity] ${error}`)
+            l.e(error, `[putStravaActivity] https error`)
+            err(`[putStravaActivity] https error ${error}`)
         })
 
         getUserOauth(userid)
@@ -529,7 +531,7 @@ function putStravaActivity(userid, activityid, newData) {
                 REQUEST.end()
             })
             .catch(error => {
-                console.error(`${new Date()} [putStravaActivity] [getUserOauth] ${error}`)
+                l.e(`[putStravaActivity] [getUserOauth] ${error}`)
                 err(`[putStravaActivity] [getUserOauth] ${error}`)
             })
     })
@@ -550,11 +552,17 @@ function processActivities(userid, activityid) {
     xx.x°F <condition>, feels like xx.x°F, Humidity xx.xx%, Wind xx.xmph from ↻ xx°NE w/ xx.xmph gusts, Clouds Cover xx.x%, UV Index x
     */
     let finalDescription
-    let date
-    let activityDate;
+    let activity
+
+    l.i(`[processActivities] new activity ${activityid} by ${userid}`)
     getStravaAPI("activities/" + activityid + "?include_all_efforts=0", userid)
         .then(dataActivity => {
+            activity = dataActivity
             writeFileJson(`${SETTINGS.data_dir}/user/${userid}/activities/`, activityid, JSON.stringify(dataActivity))
+
+            if (activity.description.includes(SETTINGS.description_ending)) {
+                return Promise.reject("already processed activity")
+            }
 
             finalDescription = dataActivity.description + "\n[SPLITS]\n"
             for (const index in dataActivity.laps) {
@@ -565,8 +573,8 @@ function processActivities(userid, activityid) {
 
             if (dataActivity.start_latlng && dataActivity.end_latlng) {
                 // has gps so process gps data into weather data
-                date = new Date(dataActivity.start_date)
                 activityDate = dataActivity.start_date.split("T")[0]
+                activityName = dataActivity.name
                 const sLat = dataActivity.start_latlng[0]
                 const sLon = dataActivity.start_latlng[1]
                 const eLat = dataActivity.end_latlng[0]
@@ -598,14 +606,23 @@ function processActivities(userid, activityid) {
             }
 
             // calls weather api using optimized location for optimal cache hitting
-            return getVisualCrossing(location, activityDate, type)
+            return getVisualCrossing(location, activity.start_date.split("T")[0], type)
         })
         .then(dataWeather => {
             if (dataWeather["strava_addon_skip"]) {
-                return putStravaActivity(userid, activityid, { "description": finalDescription })
+                return putStravaActivity(userid, activityid, {
+                    "commute": activity.commute,
+                    "trainer": activity.trainer,
+                    "hide_from_home": activity.hide_from_home,
+                    "description": finalDescription,
+                    "name": activity.name,
+                    "type": activity.type,
+                    "gear_id": activity.gear_id
+                })
             }
 
             // process weather data at start of activity
+            const date = new Date(activity.start_date)
             const roundedHour = date.getHours() + (date.getMinutes() >= 30 ? 1 : 0)
             const w = dataWeather.days[0].hours[roundedHour]
 
@@ -622,17 +639,21 @@ function processActivities(userid, activityid) {
             }
 
             return putStravaActivity(userid, activityid, {
-                "name": SETTINGS.weather_icons[w.icon] + " " + tmp_activity.name,
-                "description": finalDescription
+                "commute": activity.commute,
+                "trainer": activity.trainer,
+                "hide_from_home": activity.hide_from_home,
+                "description": finalDescription + SETTINGS.description_ending,
+                "name": SETTINGS.weather_icons[w.icon] + " " + activity.name,
+                "type": activity.type,
+                "gear_id": activity.gear_id
             })
         })
         .then(data => {
             // done with update
-            console.log(`[processActivities] done updating activity activity/${activityid}`)
+            l.i(`[processActivities] done updating activity ${activityid} by ${userid}`)
         })
         .catch(e => {
-            console.error(`${new Date()} [processActivities] something broke while processig activity/${activityid}`)
-            console.error(e)
+            l.e(e, `[processActivities] something broke while processig activity ${activityid} by ${userid}: `)
         })
         .finally(() => {
             const next = ACTIVITY_QUEUE.next()
@@ -647,15 +668,15 @@ function processActivities(userid, activityid) {
  * Goes to Strava and refreshes for new activities
  */
 function getNewActivities() {
+    FS.mkdirSync(SETTINGS.data_dir + "/strava_oauth/", { recursive: true })
     FS.readdir(SETTINGS.data_dir + "/strava_oauth/", (err, files) => {
         if (err) {
-            console.error(`${new Date()}`)
-            console.error(err)
+            l.e(err, `[getNewActivities] readdir error`)
             return
         }
 
         if (files.length == 0) {
-            console.log(`${new Date()} [updateGetActivities] No users to refresh data from.`)
+            l.i(`[updateGetActivities] No users to refresh data from.`)
             return
         }
 
@@ -665,6 +686,7 @@ function getNewActivities() {
         })
 
         const pollUser = userid => {
+            l.i(`[getNewActivities] [pollUser] finding new activities from ${userid}`)
             getStravaAPI("athlete/activities", userid)
                 .then(res => {
                     if (res.length == 0) {
@@ -675,8 +697,8 @@ function getNewActivities() {
                     FS.mkdirSync(BASE_FS, { recursive: true })
 
                     for (let i = 0; i < res.length; i++) {
-                        // todo incoperate gzip setting after done developing
-                        if (FS.existsSync(BASE_FS + res[i].id + ".json")) {
+                        const FILE = BASE_FS + res[i].id + ".json" + (SETTINGS.gzip_comp_data ? ".gz" : "")
+                        if (FS.existsSync(FILE)) {
                             continue
                         }
                         ACTIVITY_QUEUE.add([userid, "" + res[i].id])
@@ -688,14 +710,15 @@ function getNewActivities() {
                     }
                 })
                 .catch(e => {
-                    console.error(`${new Date()}`)
-                    console.error(e)
+                    l.e(e)
                 })
         }
 
         for (const user in users) {
+            l.i(`[getNewActivities] found user ${user}`)
             pollUser(user)
         }
+        l.i("[getNewActivities] done scanning for users...")
     })
 }
 
@@ -728,11 +751,13 @@ function route_oauthHandler(req, res) {
     const QUERY = URL.parse(req.url, true).query
     if (QUERY.error == "access_denied") {
         // user clicked cancel on OAUTH prompt, try again
+        l.i(`[route_oauthHandler] responded w/ access_denied ${req.url}`, "", true)
         route_oauthPrompt(req, res, "Cancel was pressed. Not authorized.")
         return
     }
     if (QUERY.scope == undefined || QUERY.code == undefined) {
         // how does this happen, try again
+        l.i(`[route_oauthHandler] responded w/ missing query ${req.url}`, "", true)
         route_oauthPrompt(req, res, "Epic error on Strava's end. Please try again.")
         return
     }
@@ -745,11 +770,13 @@ function route_oauthHandler(req, res) {
     }
     if (!allScopes) {
         // missing at least 1 scope, try again
+        l.i(`[route_oauthHandler] responded w/ 1+ scopes ${req.url}`, "", true)
         route_oauthPrompt(req, res, "Not all permissions were given. Please make sure all the requested permissions are selected.")
         return
     }
 
     // yay all scopes are given, get token time
+    l.i(`[route_oauthHandler] [request] getting users's token`)
     const REQUEST = HTTPS.request({
         host: "www.strava.com",
         path: `/api/v3/oauth/token?client_id=${SETTINGS.client_id}&client_secret=${SETTINGS.client_secret}&grant_type=authorization_code&code=${QUERY.code}`,
@@ -763,7 +790,7 @@ function route_oauthHandler(req, res) {
                 if (DATA.errors) {
                     // error with getting token, try again
                     route_oauthPrompt(req, res, "An unexpected error has occurred. Please try again.")
-                    console.debug(DATA)
+                    l.d(DATA, "[route_oauthHandler] [request] unexpected error")
                     return
                 }
 
@@ -776,26 +803,27 @@ function route_oauthHandler(req, res) {
                 res.write(HTML_BUILDER.html_end)
                 res.end()
 
+                l.i(`[route_oauthHandler] [request] updated ${DATA.athlete.id}'s token`)
                 writeFileJson(SETTINGS.data_dir + "/strava_oauth/", DATA.athlete.id, JSON.stringify(DATA))
+                getNewActivities()
             } catch (error) {
-                console.error(`${new Date()}`)
-                console.error(error)
+                l.e(error, `[route_oauthHandler] failed to parse JSON data`)
             }
         })
     })
     REQUEST.on("error", error => {
-        console.error(`${new Date()}`)
-        console.error(error)
+        l.e(error, `[route_oauthHandler] https POST token error`)
     })
     REQUEST.end()
 }
 
 
 const SERVER = HTTP.createServer((req, res) => {
-    console.log(`${new Date()} ${req.url}`)
+    l.i(`[server] new connection @ ${req.url}`)
     if (req.url == "/favicon.ico" || req.method != "GET") {
         res.writeHead(403)
         res.end("403")
+        l.i(`[server] responded w/ 403 favicon`, "", true)
         return
     }
     if (req.url == "/") {
@@ -806,6 +834,7 @@ const SERVER = HTTP.createServer((req, res) => {
         route_oauthHandler(req, res)
         return
     }
+    l.i(`[server] responded w/ 500 ${req.url}`, "", true)
     res.writeHead(500)
     res.end("500")
 })
